@@ -1,0 +1,533 @@
+
+
+
+install.packages(c("tidyverse","tidymodels","performance","glmnet"))
+
+
+
+df_train=read.table("sat.trn")
+possible_levels = as.factor(c("1","2","3","4","5","7"))
+df_train$V37=factor(df_train$V37,levels = possible_levels)
+colnames(df_train)[37] ="y"
+str(df_train)
+
+library(ggplot2)
+
+library(tidyr)
+ggplot(gather(df_train, key, value, -y), aes(value, fill = y)) + 
+  geom_histogram(aes(y = ..density..), alpha = 0.6, position = "identity") + 
+  facet_wrap(~key, scales = 'free_x')
+
+barplot(table(df_train$y))
+
+barplot(table(df_train$y), beside = TRUE, legend = TRUE)
+ggplot(as.data.frame(table(df_train$y)), aes(factor(y), Freq, fill = y)) +     
+  geom_col(position = 'dodge')
+
+library(glmnet)
+
+
+glmnet(as.matrix(df_train[,-37]), df_train$y,alpha=0.1,family = "multinomial")
+fit_final=glmnet(as.matrix(df_train[,-37]), df_train$y,alpha=0.1,family = "multinomial")
+cvfit = cv.glmnet(as.matrix(df_train[,-37]), df_train$y,alpha=0.1, type.measure = "class", nfolds = 5,family = "multinomial")
+
+alpha_seq=seq(0,1,0.05) # la grilla de alpha la defino aca
+columns = c("alpha","lambda_opt","Class_error","SD","params_nonz") 
+df_metricas = data.frame(matrix(nrow = length(alpha_seq), ncol = length(columns))) 
+colnames(df_metricas) = columns
+
+
+for(i in 1:length(alpha_seq)){
+  set.seed(50) # misma semilla para cada alpha
+  cvfit = cv.glmnet(as.matrix(df_train[,-37]), df_train$y,alpha=alpha_seq[i], type.measure = "class", nfolds = 5,family = "multinomial")
+  df_metricas$alpha[i]=alpha_seq[i]
+  df_metricas$lambda_opt[i]=cvfit$lambda.1se # tomo el 1se pero podria tomar el min
+  df_metricas$Class_error[i]=cvfit$cvm[cvfit$index[2]] 
+  df_metricas$SD[i]=cvfit$cvsd[cvfit$index[2]]
+  df_metricas$params_nonz[i]=cvfit$nzero[cvfit$index[2]]
+  
+}
+df_metricas
+plot(alpha_seq,df_metricas$Class_error,ylim=c(0.10,0.18),type="o",col="red", main=expression("Error de Clasificacion en validacion cruzada para Criterio 1SE en funcion de"~alpha  ),
+     xlab=expression(~alpha),
+     ylab="Error de clasificacion",
+     lwd=2
+)
+lines(alpha_seq,df_metricas$Class_error - 2*df_metricas$SD,col="blue",lty=2 )
+lines(alpha_seq,df_metricas$Class_error + 2*df_metricas$SD,col="blue",lty=2 )
+
+install.packages("caret")
+library(caret)
+help("confusionMatrix")
+
+error_class_loss <- function(y, y_pred) {
+  correctos = sum(y==y_pred)
+  totales = length(y)
+  return(1 - correctos/totales)
+  
+}
+
+library(randomForest)
+rf_fit <- function(x, y, hyper) {
+  
+  ntree=hyper$ntree
+  mtry=hyper$nmtry
+  
+  data_copia = data.frame(x,y=y)
+  ajuste = randomForest(y ~ ., data = data_copia,mtry=mtry,ntree=ntree)
+  
+  return(ajuste)  
+  
+}
+
+
+
+rf_predict <- function(ajuste,test,hyper=NA) {
+  y_pred=factor(predict(ajuste, newdata = test),levels = possible_levels)
+  return(y_pred)
+  
+}
+
+
+cv <- function(x,y,hyper, fit, prediction, loss, k = 5, seed = 50) {
+  set.seed(seed)
+  err <- c()
+  folds <- sample(nrow(x)) %% k + 1
+  for (fold in 1:k) {
+    test <- folds == fold
+    train <- !test
+    model <- fit(x[train,],y[train],hyper)
+    pred <- prediction(model, x[test, ],hyper)
+    err <- cbind(err, loss(pred, y[test]))
+  }
+  
+  return(  list(mean_error_rate=mean(err),sd_er=sd(err)/sqrt(k)))
+}
+
+
+hyp_rf=list(ntree=200,nmtry=18)
+hyp_rf
+
+ajuste_rf=rf_fit(df_train[,-37],df_train[37],hyp_rf)
+ajuste_rf
+
+
+rf_predict(ajuste_rf,test = df_train)
+
+error_class_loss(df_train$y,rf_predict(ajuste_rf,test = df_train))
+
+cv(x = df_train[,-37],
+   y = df_train[,37],
+    hyper = hyp_rf,
+    fit = rf_fit ,
+    prediction = rf_predict,
+    loss=error_class_loss
+  
+)
+
+
+
+hypers_rf=as.data.frame(expand.grid(ntree = seq(100,500,100) ,nmtry = seq(2,36,2)))
+hypers_rf
+
+
+
+library(lightgbm)
+help(lightgbm)
+
+lgbm_fit <- function(x, y, hyper) {
+  train_x = as.matrix(x)
+  y_train = as.numeric(as.factor(y))-1
+  
+  params=list(objective = as.character(hyper$objective),
+              metric = as.character(hyper$metric),
+              feature_fraction = hyper$feature_fraction,
+              lambda_l1 =  hyper$lambda_l1,
+              lambda_l2 =  hyper$lambda_l2,
+              num_tree=hyper$num_tree,
+              max_depth = hyper$max_depth,
+              learning_rate=hyper$learning_rate,
+              num_class = 6
+              
+              
+  )
+  
+  ajuste = lightgbm(params = params, data = train_x,label=y_train
+                    ,verbose=-1
+                    )
+  
+  return(ajuste)  
+  
+}
+
+hyp.lgb.ganador = list(objective = "multiclass",
+                       metric = "multiclass",
+                       feature_fraction = 0.2,
+                       lambda_l1=1,
+                       lambda_l2=2,
+                       num_tree=400,
+                       max_depth  = -1,
+                       learning_rate=0.05,
+                       num_class = 6)
+
+
+lgbm_ajuste=lgbm_fit(df_train[,-37],df_train[,37],hyp.lgb.ganador)
+lgbm_ajuste
+
+predict(lgbm_ajuste,data=as.matrix(df_train[,-37]), reshape=T)
+
+pred = predict(lgbm_ajuste,data=as.matrix(df_train[,-37]), reshape=T)
+pred
+pred_y = max.col(pred)
+pred_y
+
+lgbm_predict <- function(ajuste,test,hyper=NA) {
+  pred = predict(ajuste,data=as.matrix(test[,-37]), reshape=T)
+  
+  y_pred= max.col(pred)
+  y_pred = ifelse(y_pred==6,7,y_pred)
+  return(y_pred)
+}
+
+unique((lgbm_predict(lgbm_ajuste,df_train)))
+max(as.numeric(df_train$y))
+unique(df_train$y)
+
+error_class_loss(df_train$y,lgbm_predict(lgbm_ajuste,df_train))
+
+
+
+hypers_lgbm=as.data.frame(expand.grid(
+  objective = c("multiclass"),
+  metric=c("multiclass") ,
+  feature_fraction = seq(0.2,1,0.4) ,
+  lambda_l1 = seq(0,1,0.5),
+  lambda_l2 = seq(0,1,0.5),
+  num_tree = c(250,500),
+  max_depth = c(-1,5,15),
+  learning_rate = 0.05
+))
+hypers_lgbm
+
+
+
+cv(x = df_train[,-37],
+   y = df_train[,37],
+   hyper = hyp.lgb.ganador,
+   fit = lgbm_fit ,
+   prediction = lgbm_predict,
+   loss=error_class_loss
+
+# -------------------------------------------------------------------------
+
+   
+)
+
+hypers_rf=as.data.frame(expand.grid(ntree = seq(100,500,100) ,nmtry = seq(2,36,2)))
+hypers_rf
+
+candidates_rf = list(
+  
+  fit = rf_fit,
+  predict = rf_predict,
+  hyper = hypers_rf
+)
+
+candidates_lgbm = list(
+  
+  fit = lgbm_fit,
+  predict = lgbm_predict,
+  hyper = hypers_lgbm
+)
+
+candidates_all <- list(
+  candidates_rf,
+  candidates_lgbm
+)
+candidates_all
+
+
+j=1
+for (candidate in candidates_all) {
+  for (i in 1:nrow(candidate$hyper)) {
+    print(i)
+    model <- cv(
+      x=df_train[,-37],
+      y= df_train[,37],
+      hyper=as.list(candidate$hyper[i, ]) ,
+      fit = candidate$fit,
+      predict = candidate$predict,
+      loss = error_class_loss,
+      k=5,
+      seed=0
+    )
+    candidates_all[[j]]$mean_error_rate[i]=model$mean_error_rate
+    candidates_all[[j]]$sd_er[i]=model$sd_er
+  }
+  j=j+1
+}
+
+df_resultados_rf=cbind(candidates_all[[1]]$hyper,candidates_all[[1]]$mean_error_rate,candidates_all[[1]]$sd_er)
+colnames(df_resultados_rf)
+nombre_col_rf = c(colnames(df_resultados_rf)[1:2],"mean_error_rate","sd_err") 
+colnames(df_resultados_rf) = nombre_col_rf
+df_resultados_rf$mean_error_rate=round(df_resultados_rf$mean_error_rate,4)
+df_resultados_rf$sd_er=round(df_resultados_rf$sd_er,4)
+df_resultados_rf
+write.csv(df_resultados_rf, "df_resultados_rf_problema1_clas.csv")
+
+
+
+df_resultados_lgbm=cbind(candidates_all[[2]]$hyper,candidates_all[[2]]$mean_error_rate,candidates_all[[2]]$sd_er)
+colnames(df_resultados_lgbm)
+nombre_col_lgbm = c(colnames(df_resultados_lgbm)[1:8],"mean_error_rate","sd_err") 
+colnames(df_resultados_lgbm) = nombre_col_lgbm
+df_resultados_lgbm$mean_error_rate=round(df_resultados_lgbm$mean_error_rate,4)
+df_resultados_lgbm$sd_er=round(df_resultados_lgbm$sd_er,4)
+df_resultados_lgbm
+write.csv(df_resultados_lgbm, "df_resultados_lgbmf_problema1_clas.csv")
+library(Matrix)
+
+# train_sparse = Matrix(as.matrix(df_train[,-37]), sparse=TRUE)
+# y_train  = as.numeric(as.factor(df_train[,37]))-1
+# 
+# hyp.lgb.ganador = list(objective = "multiclass",
+#                        metric = "multiclass",
+#                        feature_fraction = 0.2,
+#                        
+#                        num_tree=500,
+#                        min_data_in_leaf = 4,
+#                        learning_rate=0.05,
+#                        num_class = 6)
+# 
+# lgb.train = lgb.Dataset(data=train_sparse, label=y_train)
+# lgb.model.cv = lgb.cv(params = hyp.lgb.ganador, data = lgb.train, ,  nfold = 5, stratified = TRUE)
+# 
+# lgb.model.cv$best_score
+
+library(formattable)
+df_resultados_rf$mean_error_rate=round(df_resultados_rf$mean_error_rate,4)
+df_resultados_rf$sd_er=round(df_resultados_rf$sd_er,4)
+df_resultados_rf=df_resultados_rf[,c(-5,-6)]
+df_resultados_rf
+
+formattable(df_resultados_rf[order(df_resultados_rf$mean_error_rate,decreasing = F),][1:5,], list(
+
+  mean_error_rate   = color_bar("#80ed99"),
+  sd_err = color_bar("#48cae4"))
+  
+)
+
+
+
+df_resultados_lgbm$mean_error_rate=round(df_resultados_lgbm$mean_error_rate,4)
+df_resultados_lgbm$sd_err=round(df_resultados_lgbm$sd_err,4)
+
+
+
+formattable(df_resultados_lgbm[order(df_resultados_lgbm$mean_error_rate,decreasing = F),][1:5,3:10], list(
+
+  mean_error_rate   = color_bar("#80ed99"),
+  sd_err = color_bar("#48cae4"))
+  
+)
+
+
+
+colnames(df_metricas)[3] ="mean_error_rate"
+colnames(df_metricas)[4] ="sd_err"
+df_metricas
+df_metricas$mean_error_rate=round(df_metricas$mean_error_rate,4)
+df_metricas$sd_er=round(df_metricas$sd_er,4)
+df_metricas$lambda_opt=round(df_metricas$lambda_opt,4)
+df_metricas <- df_metricas[ ,c(-4,-5) ]
+formattable(df_metricas[order(df_metricas$mean_error_rate,decreasing = F),][1:5,], list(
+
+  mean_error_rate   = color_bar("#80ed99"),
+  sd_err = color_bar("#48cae4"))
+  
+)
+
+df_test=read.table("sat.tst")
+colnames(df_test)[37] ="y"
+table(df_test$y)
+possible_levels = as.factor(c("1","2","3","4","5","7"))
+df_test$y=factor(df_test$y,levels = possible_levels)
+
+hyp.lgb.ganador = list(objective = "multiclass",
+                       metric = "multiclass",
+                       feature_fraction = 0.6,
+                       lambda_l1=0,
+                       lambda_l2=0.5,
+                       num_tree=500,
+                       max_depth  = 15,
+                       learning_rate=0.05,
+                       num_class = 6)
+  
+  
+
+ajuste_ganador=lgbm_fit(df_train[,-37],df_train[,37],hyp.lgb.ganador)
+
+
+
+
+pred_test=lgbm_predict(ajuste_ganador,df_test)
+pred_test
+
+
+
+
+
+y_test_binary = as.numeric(data_clean_bis[test,3] == "Yes")
+pred_test_binary = as.numeric(pred_test == "Yes")
+
+
+
+PRROC_obj <- roc.curve(scores.class0 = pred_test_binary, weights.class0=y_test_binary,
+                       curve=TRUE)
+pred_test
+df_test[,37]
+
+pred_probas_test=predict(object=ajuste_ganador,newdata =data_clean_bis[test,]) 
+
+df_roc_ganador_test = data.frame(predictions=pred_probas_test,labels=y_test_binary)
+
+PRROC_obj <- roc.curve(scores.class0 = df_roc_ganador_test$predictions, weights.class0=df_roc_ganador_test$labels,
+                       curve=TRUE)
+plot(PRROC_obj,main="Curva ROC - Mejor Modelo con 2 Variables")
+
+cm_test=confusionMatrix(df_test[,37], as.factor(pred_test))
+cm_test$byClass
+cm_test
+fourfoldplot(as.table(cm_test),color=c("red","green"),main = "Matriz de Confusion - Set de Testeo")
+install.packages("cvms")
+library(cvms)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+intall.
+labels_X = c("1","2","3","4","5","7")
+labels_Y = c("1","2","3","4","5","7")
+
+help("element_text")
+ggplotConfusionMatrix = function(m){
+  mytitle = paste("* Accuracy", label = round(m$overall[1],2),"  *  Kappa
+                   Index", label = round(m$overall[2], 2))
+  
+  data_c = mutate(group_by(as.data.frame(m$table), Reference ), total = Freq)
+ 
+  data_c$Prediction = factor(data_c$Prediction , level =(levels(data_c$Prediction)))  
+  print("DDD")
+  p = ggplot(data = data_c , aes(x = Reference , y =Prediction)) +
+    geom_tile(aes(fill = Freq)) + scale_fill_gradient( low = "#CBDFCC" , high = "#04990D")+
+    scale_x_discrete(expand = expansion(add =0.54), labels = labels_X)+
+    scale_y_discrete(expand = expansion(add =0.54), labels = labels_Y)+
+    # theme (
+    #   axis.title.x = element_text(face="bold" , size = 9, hjust =0.5),
+    #   axis.title.y = element_text(face="bold" , size = 9, hjust =0.5, color = "#000000"),
+    #   axis.text.x = element_text(face="bold" , size = 8,color = "#000000"),
+    #   axis.text.y = element_text(face="bold" , size = 7.8,angle = 90,hjust = 0.5),
+    #   axis.line = element_line(linewidth = 0.4,linetype = "solid"),
+    #   legend.position = "none",
+    #   plot.title = element_Text(color = "#000000", size = 10 , face = "bold.italic")
+    # )+
+    labs(x = "Referencia", y ="Predicho")+
+    ggtitle(mytitle)+
+    geom_text(aes(label = total),size = 3.8)
+  return(p)
+    
+    
+  
+  
+  }
+x=mutate(group_by(as.data.frame(cm_test$table), Reference ), total = Freq)
+x
+factor(x$prediction , level =(levels(x$prediction)))  
+x$Prediction
+ggplotConfusionMatrix(cm_test)
+as.data.frame(cm_test$table)
+plot_confusion_matrix(cm_test)
+df_tabla_resumen_bis = data.frame(Metrica=c("F1","Precision","Recall","Especificidad","Error de Clasificacion"),
+                                  Valor=c(0.6429,0.6429,0.6429,0.8214,0.7321)
+)
+
+
+df_metricas_cm  = data.frame(cm_test$byClass)
+
+round_df <- function(df, digits) {
+  nums <- vapply(df, is.numeric, FUN.VALUE = logical(1))
+  
+  df[,nums] <- round(df[,nums], digits = digits)
+  
+  (df)
+}
+df_metricas_cm=round_df(df_metricas_cm, digits=4)
+
+df_metricas_cm = rownames_to_column(df_metricas_cm)
+colnames(df_metricas_cm)[1] ="Clase"
+df_metricas_cm
+movie_data <- data.frame(Movie_views = c(1, 1, 1, 2, 29),
+                         row.names = c("Movie1", "Movie2", "Movie3", "Movie4", "Movie5"))
+
+
+df_metricas_cm
+formattable(df_metricas_cm[,c(1,12)],
+            list(
+              
+              Balanced.Accuracy   = color_bar("#80ed99")
+             )
+            
+            )
+
+formattable(df_metricas_cm)
+nrow(data_clean_train)
+nrow(data_clean_bis_train)
+
+
+
+hyp_rf_ganador=list(ntree=100,nmtry=12)
+ajuste_ganador_rf=rf_fit(df_train[,-37],df_train[,37],hyp_rf_ganador)
+pred_test_rf=rf_predict(ajuste_ganador_rf,df_test)
+cm_test_rf=confusionMatrix(df_test[,37], as.factor(pred_test_rf))
+
+ggplotConfusionMatrix(cm_test_rf)
+df_metricas_rf  = data.frame(cm_test_rf$byClass)
+
+df_metricas_rf=round_df(df_metricas_rf, digits=4)
+
+df_metricas_rf = rownames_to_column(df_metricas_rf)
+colnames(df_metricas_rf)[1] ="Clase"
+formattable(df_metricas_rf[,c(1,12)],
+            list(
+              
+              Balanced.Accuracy   = color_bar("#80ed99")
+            )
+            
+)
+
+fit_final=glmnet(as.matrix(df_train[,-37]), df_train$y,alpha=0.5,family = "multinomial")
+
+pred_test_glm=predict(fit_final,newx=as.matrix(df_test[,-37]),s=0.0004)
+ncol(pred_test_glm)
+pred_test_glm=matrix(pred_test_glm,ncol=6)
+pred_test_glm= max.col(pred_test_glm)
+pred_test_glm
+length(pred_test_glm)
+pred_test_glm = ifelse(pred_test_glm==6,7,pred_test_glm)
+
+cm_test_glm=confusionMatrix(df_test[,37], as.factor(pred_test_glm))
+
+ggplotConfusionMatrix(cm_test_glm)
+df_metricas_glm  = data.frame(cm_test_glm$byClass)
+
+df_metricas_glm=round_df(df_metricas_glm, digits=4)
+
+df_metricas_glm = rownames_to_column(df_metricas_glm)
+colnames(df_metricas_glm)[1] ="Clase"
+formattable(df_metricas_glm[,c(1,12)],
+            list(
+              
+              Balanced.Accuracy   = color_bar("#80ed99")
+            )
+            
+)
