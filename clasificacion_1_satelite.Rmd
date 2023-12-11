@@ -1,0 +1,161 @@
+---
+title: "Problema de Clasificacion_1 Satelite"
+output: html_notebook
+---
+
+
+```{r}
+setwd("C:/Users/HP/Downloads")
+sat=read.table("sat.trn",sep = " ")
+sat.tst=read.table("sat.tst.txt",sep=" ")
+```
+```{r}
+# Instalar y cargar el paquete 'randomForest' si no está instalado
+if (!requireNamespace("randomForest", quietly = TRUE)) {
+  install.packages("randomForest")
+}
+library(randomForest)
+```
+
+```{r}
+# Asignar nombres a las columnas
+colnames(sat) <- colnames(sat.tst) <- paste0("Band", 1:36, "_Pixel")
+
+# La última columna es la clase
+colnames(sat)[37] <- colnames(sat.tst)[37] <- "Clase"
+
+# Entrenar el modelo de Bosques Aleatorios
+rf_model <- randomForest(Clase ~ ., data = sat)
+
+# Hacer predicciones en el conjunto de prueba
+predictions <- predict(rf_model, sat.tst)
+
+# Visualizar las predicciones
+head(predictions)
+```
+```{r}
+# Seleccionar solo las primeras dos características para el gráfico
+features_to_plot <- c("Band1_Pixel", "Band2_Pixel")
+
+# Crear un nuevo conjunto de datos con las características seleccionadas y la clase
+plot_data <- cbind(sat.tst[, features_to_plot, drop = FALSE], Clase = as.factor(sat.tst$Clase), Prediccion = as.factor(predictions))
+
+# Crear el gráfico de dispersión
+plot(plot_data[, 1:2], col = plot_data$Clase, pch = 19, main = "Predicciones vs. Clases Reales",
+     xlab = features_to_plot[1], ylab = features_to_plot[2])
+
+# Agregar leyenda
+legend("topright", legend = levels(sat.tst$Clase), col = 1:7, pch = 19, title = "Clase Real")
+
+```
+```{r}
+# Calcular el MSE
+mse <- mean((sat.tst$Clase - predictions)^2)
+print(paste("MSE:", mse))
+```
+```{r}
+# Instalar y cargar el paquete tree si aún no lo has hecho
+# install.packages("tree")
+library(tree)
+
+# Supongamos que 'datos' es tu conjunto de datos con la variable de respuesta 'y' y las variables predictoras 'x1', 'x2', ...
+# Ajustar un árbol de regresión
+modelo_arbol <- tree(Clase ~ ., data = sat)
+
+# Visualizar el árbol
+plot(modelo_arbol)
+text(modelo_arbol, pretty = 0)
+
+```
+```{r}
+# Encontrar la profundidad óptima mediante validación cruzada
+cv_resultados <- cv.tree(modelo_arbol)
+mejor_profundidad <- cv_resultados$size[which.min(cv_resultados$dev)]
+plot(cv_resultados)
+```
+
+
+```{r}
+# Ajustar el árbol con la mejor profundidad
+arbol_optimo <- tree(Clase ~ ., data = sat.tst, control = tree.control(nobs = nrow(sat.tst), mincut = mejor_profundidad))
+
+# Visualizar el árbol óptimo
+plot(arbol_optimo)
+text(arbol_optimo, pretty = 0)
+```
+```{r}
+predicciones_test <- predict(arbol_optimo, newdata = sat.tst)
+
+# Calcular el MSE
+mse <- mean((sat$Clase - predicciones_test)^2)
+
+# Imprimir el MSE
+cat("MSE en el conjunto de test:", mse, "\n")
+
+```
+```{r}
+# Instala el paquete randomForest si no está instalado
+# install.packages("randomForest")
+
+# Instala el paquete caret si no está instalado
+# install.packages("caret")
+
+library(randomForest)
+
+
+# Separa las variables predictoras (X) y la variable objetivo (y)
+X_train <- sat[, -37]
+y_train <- sat[, 37]
+X_test <- sat.tst[, -37]
+y_test <- sat.tst[, 37]
+
+# Establece la semilla para reproducibilidad
+set.seed(123)
+
+# Número de árboles en el bagging
+num_trees <- 100
+
+# Almacena los modelos individuales en una lista
+bagging_models <- vector("list", num_trees)
+
+# Ajusta modelos individuales y realiza predicciones
+for (i in 1:num_trees) {
+  # Muestreo con reemplazo para construir subconjuntos de entrenamiento
+  indices <- sample(1:nrow(X_train), replace = TRUE)
+  X_bag <- X_train[indices, ]
+  y_bag <- y_train[indices]
+  
+  # Ajusta un modelo de árbol de decisión
+  tree_model <- randomForest(X_bag, y_bag, ntree = 100)
+  
+  # Almacena el modelo en la lista
+  bagging_models[[i]] <- tree_model
+}
+
+# Realiza predicciones en el conjunto de prueba
+predictions <- predict(bagging_models[[1]], newdata = X_test, type = "response")
+
+# Promedia las predicciones de todos los modelos
+for (i in 2:num_trees) {
+  predictions <- predictions + predict(bagging_models[[i]], newdata = X_test, type = "response")
+}
+
+# Divide las predicciones por el número de modelos para obtener un promedio
+predictions <- predictions / num_trees
+
+# Convierte las predicciones a clases (0 o 1)
+predictions <- ifelse(predictions > 0.5, 1, 0)
+
+# Evalúa el rendimiento del modelo
+accuracy <- sum(predictions == y_test) / length(y_test)
+print(paste("Bagging Accuracy Score:", accuracy))
+# Calcula el MSE
+mse <- mean((predictions - y_test)^2)
+
+# Imprime el resultado
+print(paste("Bagging Mean Squared Error:", mse))
+
+```
+
+
+
